@@ -2535,7 +2535,9 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
                 }
             }
             
-            if (src0->ne[0] == 2880 && src1->ne[1] == 128 && src0->ne[1] == 2880) {
+            // Actual dimensions from logs: src0->ne[0]=2880, src0->ne[1]=128, src1->ne[1]=512
+            // This is C = src0^T * src1 where src0 is 2880x128 (transposed) and src1 is 128xN
+            if (src0->ne[0] == 2880 && src0->ne[1] == 128 && src1->ne[1] <= 512) {
                 // Use custom gfx906 kernel for attention operations
                 // Operation: C = src0^T * src1 (matching cuBLAS CUBLAS_OP_T behavior)
                 GGML_TENSOR_BINARY_OP_LOCALS
@@ -2544,8 +2546,8 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
                 const float * B = (const float *) src1->data;
                 float * C = (float *) dst->data;
                 const int M = ne00;  // src0->ne[0] = 2880
-                const int N = ne11;  // src1->ne[1] = 128
-                const int K = ne01;  // src0->ne[1] = ne10 = 2880
+                const int N = ne11;  // src1->ne[1] = batch size (128 or 512)
+                const int K = ne01;  // src0->ne[1] = 128
                 // Strides: nb01 is stride between rows of src0, nb11 is stride between rows of src1
                 const int64_t stride_A = nb01 / sizeof(float); // stride for src0 (row stride in elements)
                 const int64_t stride_B = nb11 / sizeof(float); // stride for src1 (row stride in elements)

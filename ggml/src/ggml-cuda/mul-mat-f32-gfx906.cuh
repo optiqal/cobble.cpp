@@ -121,8 +121,9 @@ static void mul_mat_f32_gfx906(
     const int64_t stride_B, // stride for B (s11)
     const int64_t stride_C) { // stride for C (ne0)
     
-    // For attention operations (M=2880, N=128, K=2880), use specialized kernel
-    if (M == 2880 && N == 128 && K == 2880) {
+    // For attention operations (M=2880, K=128, N<=512), use specialized kernel
+    // Actual dimensions from logs: M=2880, K=128, N=512 (batch size)
+    if (M == 2880 && K == 128 && N <= 512) {
         constexpr int TILE_M = 64;
         constexpr int TILE_N = 32;
         dim3 grid((M + TILE_M - 1) / TILE_M, (N + TILE_N - 1) / TILE_N);
