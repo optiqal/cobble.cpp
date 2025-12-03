@@ -3432,9 +3432,10 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
     // Software pipelining: Double buffer tile_x to overlap memory loads with computation
     // This hides HBM2 latency (~194ns) by loading next iteration while computing current
     // Strategy: Use two tile_x buffers, alternate between them using buffer indices
+    // TEMPORARILY DISABLED: Investigating crash - re-enable after fixing shared memory calculation
     int * tile_x_buf[2] = {tile_x, tile_x + tile_x_size};
     int buf_idx = 0; // Current buffer index (0 or 1)
-    constexpr bool use_pipelining = true;
+    constexpr bool use_pipelining = false; // TEMPORARILY DISABLED
 #else
     constexpr bool use_pipelining = false;
     int buf_idx = 0;
@@ -3455,10 +3456,13 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 #if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
     // Software pipelining: Pre-load first tile_x before entering main loop
     // This allows us to start computation immediately while loading the next tile
+    const bool has_multiple_iterations = (kb0_stop - kb0_start) > blocks_per_iter;
     if (kb0_start < kb0_stop) {
         load_tiles(x, tile_x_buf[buf_idx], offset_x + kb0_start, tile_x_max_i, stride_row_x);
     }
     __syncthreads();
+#else
+    constexpr bool has_multiple_iterations = false;
 #endif
 
     for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter) {
@@ -3501,7 +3505,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         // Software pipelining: Start loading next iteration's tile_x while we prepare for second vec_dot
         // This overlaps the memory load with tile_y[1] loading and second vec_dot computation
         // The memory controller can prefetch tile_x[N+1] while we compute with tile_x[N]
-        if (use_pipelining && kb0 + blocks_per_iter < kb0_stop) {
+        if (use_pipelining && has_multiple_iterations && kb0 + blocks_per_iter < kb0_stop) {
             // Load next iteration's tile_x into the alternate buffer
             // This happens in parallel with the tile_y[1] load and second vec_dot below
             load_tiles(x, tile_x_buf[next_buf], offset_x + kb0 + blocks_per_iter, tile_x_max_i, stride_row_x);
@@ -3526,7 +3530,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         
 #if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
         // Software pipelining: Swap buffers for next iteration
-        if (use_pipelining && kb0 + blocks_per_iter < kb0_stop) {
+        if (use_pipelining && has_multiple_iterations && kb0 + blocks_per_iter < kb0_stop) {
             buf_idx = next_buf; // Switch to the buffer we just loaded
         }
 #endif
@@ -3964,12 +3968,13 @@ static size_t mmq_get_nbytes_shared(const int mmq_x, const int mmq_y, const int 
     
 #if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
     // Software pipelining: Double buffer tile_x to overlap memory loads with computation
-    // This requires 2x tile_x size in shared memory
-    // tile_x_size = GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size) in the kernel
-    // For shared memory calculation, we use nbs_x which represents tile_x size
-    // Double it for double buffering
-    const size_t tile_x_size_padded = GGML_PAD(nbs_x / sizeof(int), nwarps*warp_size) * sizeof(int);
-    return nbs_ids + tile_x_size_padded * 2 + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
+    // TEMPORARILY DISABLED: Investigating crash - re-enable after fixing shared memory calculation
+    // When enabled, this requires 2x tile_x size in shared memory
+    // tile_x_size in kernel = GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size) in ints
+    // const int tile_x_size_ints = GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size);
+    // const size_t tile_x_size_bytes = tile_x_size_ints * sizeof(int);
+    // return nbs_ids + tile_x_size_bytes * 2 + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
+    return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
 #else
     return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
 #endif
