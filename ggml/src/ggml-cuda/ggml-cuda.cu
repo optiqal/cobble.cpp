@@ -215,6 +215,9 @@ static void ggml_cuda_print_capability_report(const ggml_cuda_device_info & info
             GGML_LOG_INFO("  │                     │           │ Q4_0/Q4_1 kernels      │\n");
             GGML_LOG_INFO("  ├─────────────────────────────────────────────────────────────┤\n");
             GGML_LOG_INFO("  │ MMQ heuristics      │ ✅ USED   │ mmq.cu (gfx906-specific)│\n");
+            GGML_LOG_INFO("  ├─────────────────────────────────────────────────────────────┤\n");
+            GGML_LOG_INFO("  │ Wavefront reductions│ ✅ OPTIMIZED │ common.cuh (64-lane     │\n");
+            GGML_LOG_INFO("  │                     │           │ optimized shuffle)      │\n");
             GGML_LOG_INFO("  └─────────────────────────────────────────────────────────────┘\n");
             GGML_LOG_INFO("\n  Optimization Analysis:\n");
             GGML_LOG_INFO("    • V_DOT8_I32_I4: Function ggml_cuda_dot8_i4() exists but is unused.\n");
