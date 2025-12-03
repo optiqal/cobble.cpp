@@ -3,6 +3,9 @@
 #include "ggml-backend-impl.h"
 
 #include "ggml-cuda/common.cuh"
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+#include "ggml-cuda/mul-mat-f32-gfx906.cuh"
+#endif
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
 #include "ggml-cuda/arange.cuh"
@@ -2512,6 +2515,30 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_vec_q, quantize_row_q8_1_cuda);
     } else if (use_mul_mat_q) {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+    } else if (!split && src0->type == GGML_TYPE_F32 && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+        // Check if this is an attention operation that can use our optimized gfx906 kernel
+        const int cc = ggml_cuda_info().devices[ctx.device].cc;
+        if (cc == GGML_CUDA_CC_VEGA20 && src0->ne[0] == 2880 && src1->ne[1] == 128 && src0->ne[1] == 2880) {
+            // Use custom gfx906 kernel for attention operations
+            // Operation: C = src0^T * src1 (matching cuBLAS CUBLAS_OP_T behavior)
+            GGML_TENSOR_BINARY_OP_LOCALS
+            
+            const float * A = (const float *) src0->data;
+            const float * B = (const float *) src1->data;
+            float * C = (float *) dst->data;
+            const int M = ne00;  // src0->ne[0] = 2880
+            const int N = ne11;  // src1->ne[1] = 128
+            const int K = ne01;  // src0->ne[1] = ne10 = 2880
+            // Strides: nb01 is stride between rows of src0, s11 is stride between rows of src1
+            const int64_t stride_A = nb01 / sizeof(float); // stride for src0 (row stride in elements)
+            const int64_t stride_B = s11; // stride for src1 (already in elements)
+            const int64_t stride_C = ne0;  // stride for dst (row length in elements)
+            
+            mul_mat_f32_gfx906(ctx.stream(), A, B, C, M, N, K, stride_A, stride_B, stride_C);
+            return;
+        }
+#endif
     } else {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     }
