@@ -222,6 +222,11 @@ static void ggml_cuda_print_capability_report(const ggml_cuda_device_info & info
             GGML_LOG_INFO("      CONCLUSION: Current dp4a-based approach is optimal for Q4 x Q8.\n");
             GGML_LOG_INFO("      POTENTIAL USE: Could benefit Q4 x Q4 kernels if they existed.\n");
             GGML_LOG_INFO("\n");
+            GGML_LOG_INFO("  Performance Logging Options:\n");
+            GGML_LOG_INFO("    • GGML_HIP_LOG_PERFORMANCE=1: Log kernel selection, shared memory usage, optimization opportunities\n");
+            GGML_LOG_INFO("    • GGML_CUDA_MMQ_DEBUG=1: Log detailed MMQ kernel selection decisions\n");
+            GGML_LOG_INFO("    • GGML_HIP_PROFILE_GRAPHS=1: Profile HIP graph capture/instantiation/launch times\n");
+            GGML_LOG_INFO("\n");
         }
     }
     
@@ -409,6 +414,18 @@ static ggml_cuda_device_info ggml_cuda_init() {
     static const bool log_capabilities = (getenv("GGML_HIP_LOG_CAPABILITIES") != nullptr);
     if (log_capabilities) {
         ggml_cuda_print_capability_report(info);
+    }
+
+    // Initialize performance logging if requested
+    static const bool log_performance = (getenv("GGML_HIP_LOG_PERFORMANCE") != nullptr);
+    if (log_performance) {
+        GGML_LOG_INFO("ggml_cuda_init: Performance logging enabled (GGML_HIP_LOG_PERFORMANCE=1)\n");
+        GGML_LOG_INFO("  This will log:\n");
+        GGML_LOG_INFO("    - Kernel selection (MMQ vs MMVQ vs cuBLAS)\n");
+        GGML_LOG_INFO("    - Shared memory usage and constraints\n");
+        GGML_LOG_INFO("    - Optimization opportunities (batch size, padding issues)\n");
+        GGML_LOG_INFO("    - MMQ kernel tile size selection\n");
+        GGML_LOG_INFO("  Use GGML_CUDA_MMQ_DEBUG=1 for detailed MMQ selection decisions\n");
     }
 
     // configure logging to stdout
@@ -2286,6 +2303,10 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
 }
 
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+    static const bool log_performance = (getenv("GGML_HIP_LOG_PERFORMANCE") != nullptr);
+    static thread_local int call_count = 0;
+    static thread_local std::map<std::string, int> kernel_usage_stats;
+    
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
     // If src0 is a temporary compute buffer it may have some padding that needs to be cleared for mul_mat_vec_q or mul_mat_q.
@@ -2344,6 +2365,57 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_f16  = src0->type == GGML_TYPE_F16 && (src1->type == GGML_TYPE_F16 || !any_gpus_with_slow_fp16);
     bool use_batched_cublas_bf16 = src0->type == GGML_TYPE_BF16 && bf16_mma_hardware_available(cc);
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
+
+    // Performance logging
+    if (log_performance && call_count++ < 100) { // Log first 100 calls to avoid spam
+        const char * kernel_name = nullptr;
+        const char * reason = nullptr;
+        if (!split && use_mul_mat_vec_f) {
+            kernel_name = "mul_mat_vec_f";
+            reason = "F32/F16 vector kernel (non-split)";
+        } else if (!split && use_mul_mat_f) {
+            kernel_name = "mul_mat_f";
+            reason = "F32 matrix kernel (non-split)";
+        } else if (!split && use_mul_mat_vec_q) {
+            kernel_name = "mul_mat_vec_q (MMVQ)";
+            reason = "Quantized vector kernel (non-split)";
+        } else if (!split && use_mul_mat_q) {
+            kernel_name = "mul_mat_q (MMQ)";
+            reason = "Quantized matrix kernel (non-split)";
+        } else if (!split && (use_batched_cublas_f16 || use_batched_cublas_bf16 || use_batched_cublas_f32)
+            && !ggml_is_transposed(src0) && !ggml_is_transposed(src1) && src1->ne[2]*src1->ne[3] > 1) {
+            kernel_name = "mul_mat_batched_cublas";
+            reason = "Batched cuBLAS GEMM";
+        } else if (use_mul_mat_vec_f) {
+            kernel_name = "mul_mat_vec_f (split)";
+            reason = "F32/F16 vector kernel (split)";
+        } else if (use_mul_mat_vec_q) {
+            kernel_name = "mul_mat_vec_q (MMVQ, split)";
+            reason = "Quantized vector kernel (split)";
+        } else if (use_mul_mat_q) {
+            kernel_name = "mul_mat_q (MMQ, split)";
+            reason = "Quantized matrix kernel (split)";
+        } else {
+            kernel_name = "mul_mat_cublas";
+            reason = "cuBLAS fallback";
+        }
+        
+        if (kernel_name) {
+            kernel_usage_stats[kernel_name]++;
+            GGML_LOG_INFO("ggml_cuda_mul_mat[%d]: type=%s ne11=%ld ne0=%ld ne1=%ld -> %s (%s)\n",
+                call_count, ggml_type_name(src0->type), (long)src1->ne[1], (long)src0->ne[0], (long)src0->ne[1],
+                kernel_name, reason);
+            
+            // Log optimization opportunities
+            if (ggml_is_quantized(src0->type) && src1->ne[1] > MMVQ_MAX_BATCH_SIZE && !use_mul_mat_q) {
+                GGML_LOG_INFO("  ⚠️  Optimization: ne11=%ld > MMVQ_MAX_BATCH_SIZE (%d), consider MMQ optimization\n",
+                    (long)src1->ne[1], MMVQ_MAX_BATCH_SIZE);
+            }
+            if (bad_padding_clear && ggml_is_quantized(src0->type)) {
+                GGML_LOG_INFO("  ⚠️  Optimization: bad_padding_clear=true, falling back to cuBLAS (consider padding fix)\n");
+            }
+        }
+    }
 
     if (!split && use_mul_mat_vec_f) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM

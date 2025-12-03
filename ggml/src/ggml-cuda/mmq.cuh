@@ -3859,6 +3859,9 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
 
 template <ggml_type type>
 void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
+    static const bool log_performance = (getenv("GGML_HIP_LOG_PERFORMANCE") != nullptr);
+    static thread_local int mmq_call_count = 0;
+    
     const int    id     = ggml_cuda_get_device();
     const int    cc     = ggml_cuda_info().devices[id].cc;
     const size_t smpbo  = ggml_cuda_info().devices[id].smpbo;
@@ -3883,6 +3886,22 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
         if (ntiles_x < ntiles_x_best) {
             mmq_x_best = mmq_x;
             ntiles_x_best = ntiles_x;
+        }
+    }
+
+    // Performance logging for MMQ kernel selection
+    if (log_performance && mmq_call_count++ < 50) {
+        const size_t shared_mem = mmq_get_nbytes_shared<type>(mmq_x_best, mmq_y, cc, warp_size, nwarps);
+        const char * type_str = ggml_type_name(type);
+        GGML_LOG_INFO("mul_mat_q_case[%d]: type=%s ncols_max=%ld nrows_x=%ld -> mmq_x=%d mmq_y=%d shared_mem=%zu/%zu bytes (%.1f%%)\n",
+            mmq_call_count, type_str ? type_str : "unknown", (long)args.ncols_max, (long)args.nrows_x,
+            mmq_x_best, mmq_y, shared_mem, smpbo, 100.0 * shared_mem / smpbo);
+        if (shared_mem > smpbo * 0.9) {
+            GGML_LOG_INFO("  ⚠️  Optimization: Shared memory usage (%zu bytes) is >90%% of limit (%zu bytes)\n",
+                shared_mem, smpbo);
+        }
+        if (mmq_x_best == 0) {
+            GGML_LOG_INFO("  ⚠️  Warning: No valid mmq_x found! This may indicate shared memory constraints.\n");
         }
     }
 
