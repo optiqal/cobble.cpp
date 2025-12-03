@@ -34,8 +34,13 @@ static __global__ void mul_mat_f32_gfx906_attention(
     const int block_col = blockIdx.y * TILE_N;
     
     // Shared memory tiles (padded to avoid bank conflicts on 32-bank architecture)
-    __shared__ float tile_A[TILE_M][TILE_K + 1];
-    __shared__ float tile_B[TILE_K][TILE_N + 1];
+    // For gfx906: 32 banks, each bank is 4 bytes (float), so 32 floats = 128 bytes per bank row
+    // Padding: +1 float (4 bytes) helps avoid conflicts for some access patterns
+    // For 32-bank architecture, we need to ensure stride patterns don't hit same bank
+    // TILE_K=64, TILE_M=64: accessing tile_A[k][i] with stride 64 can cause conflicts
+    // Solution: pad to 65 (64+1) to break stride-64 conflicts
+    __shared__ float tile_A[TILE_M][TILE_K + 1];  // 64x65: padding breaks stride-64 conflicts
+    __shared__ float tile_B[TILE_K][TILE_N + 1]; // 64x33: padding breaks stride-64 conflicts
     
     // Accumulator: each warp handles TILE_M/nwarps = 16 rows
     float acc[16] = {0.0f};

@@ -3332,6 +3332,10 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
     extern __shared__ int data_mul_mat_q[];
     int * tile_y = data_mul_mat_q + mmq_x;
+    // For gfx906 (32-bank architecture): ensure tile_x is properly aligned
+    // GGML_PAD aligns to nwarps*warp_size*sizeof(int) to avoid bank conflicts
+    // For gfx906: nwarps=4, warp_size=64, so padding aligns to 1024 bytes (256 ints)
+    // This ensures that tile_x access patterns don't cause bank conflicts
     int * tile_x = tile_y + GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
