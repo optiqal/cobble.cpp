@@ -519,7 +519,8 @@ bool llama_context::memory_update(bool optimize) {
                 } break;
             case LLAMA_MEMORY_STATUS_NO_UPDATE:
                 {
-                    // no updates need to be performed
+                    // no updates need to be performed - return early to avoid unnecessary work
+                    // This is an optimization: skip graph reset and reservation when there's nothing to update
                     return false;
                 }
             case LLAMA_MEMORY_STATUS_FAILED_PREPARE:
@@ -535,12 +536,15 @@ bool llama_context::memory_update(bool optimize) {
         //       reset the graph result only if the memory module did reset the scheduler
         gf_res_prev->reset();
 
+        // Apply memory updates (KV cache shifts/copies)
+        // Note: KV cache copies are now async (see llama_kv_cache::update), so this won't block GPU operations
         if (!mctx->apply()) {
             LLAMA_LOG_ERROR("%s: failed to apply memory update\n", __func__);
         }
     }
 
     // if the memory module did any computation, we have to reserve a new worst-case graph
+    // This is necessary before decode can proceed, so it must happen synchronously
     {
         const auto mctx = memory->init_full();
         if (!mctx) {
@@ -1053,6 +1057,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
     bool did_optimize = false;
 
     // handle any pending shifts/copies
+    // Optimize: only perform memory update if needed - init_update() will return
+    // LLAMA_MEMORY_STATUS_NO_UPDATE if there's nothing to do, allowing early return
+    // The actual updates (KV cache copies) are now async, so they won't block GPU operations
     memory_update(false);
 
     llama_memory_context_ptr mctx;
