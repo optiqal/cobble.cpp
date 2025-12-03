@@ -209,11 +209,11 @@ static ggml_cuda_device_info ggml_cuda_init() {
     GGML_LOG_INFO("%s: GGML_CUDA_FORCE_CUBLAS: no\n", __func__);
 #endif // GGML_CUDA_FORCE_CUBLAS
 #if defined(GGML_USE_HIP)
-#ifdef USE_CUDA_GRAPH
+#ifdef GGML_HIP_GRAPHS
     GGML_LOG_INFO("%s: HIP graphs: enabled (compiled with GGML_HIP_GRAPHS)\n", __func__);
 #else
     GGML_LOG_INFO("%s: HIP graphs: disabled (not compiled, set GGML_HIP_GRAPHS=ON to enable)\n", __func__);
-#endif // USE_CUDA_GRAPH
+#endif // GGML_HIP_GRAPHS
 #endif // GGML_USE_HIP
     GGML_LOG_INFO("%s: found %d " GGML_CUDA_NAME " devices:\n", __func__, info.device_count);
 
