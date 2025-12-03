@@ -2977,18 +2977,29 @@ static bool is_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, 
 
 static void update_cuda_graph_executable(ggml_backend_cuda_context * cuda_ctx) {
 
-#if CUDART_VERSION >= 12000
+#if defined(GGML_USE_HIP)
+    // HIP uses the older API signature with errorNode parameter
+    cudaGraphNode_t errorNode;
+    cudaGraphExecUpdateResult result_info;
+    cudaError_t stat = cudaGraphExecUpdate(cuda_ctx->cuda_graph->instance, cuda_ctx->cuda_graph->graph, &errorNode, &result_info);
+#elif CUDART_VERSION >= 12000
     cudaGraphExecUpdateResultInfo result_info;
     cudaError_t stat = cudaGraphExecUpdate(cuda_ctx->cuda_graph->instance, cuda_ctx->cuda_graph->graph, &result_info);
 #else
     cudaGraphNode_t errorNode;
     cudaGraphExecUpdateResult result_info;
     cudaError_t stat = cudaGraphExecUpdate(cuda_ctx->cuda_graph->instance, cuda_ctx->cuda_graph->graph, &errorNode, &result_info);
-#endif // CUDART_VERSION >= 12000
+#endif // defined(GGML_USE_HIP) || CUDART_VERSION >= 12000
 
     if (stat == cudaErrorGraphExecUpdateFailure) {
 #ifndef NDEBUG
-        GGML_LOG_DEBUG("%s: CUDA graph update failed\n", __func__);
+        GGML_LOG_DEBUG("%s: %s graph update failed\n", __func__,
+#if defined(GGML_USE_HIP)
+                "HIP"
+#else
+                "CUDA"
+#endif
+                );
 #endif
 
         // The pre-existing graph exec cannot be updated due to violated constraints
@@ -3723,10 +3734,22 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
             cuda_ctx->cuda_graph->number_consecutive_updates = 0;
         }
 
-        if (cuda_ctx->cuda_graph->number_consecutive_updates >= 4) {
+        // HIP graph updates may be slower, so use a higher threshold to avoid premature disabling
+#if defined(GGML_USE_HIP)
+        const int max_consecutive_updates = 8;
+#else
+        const int max_consecutive_updates = 4;
+#endif
+        if (cuda_ctx->cuda_graph->number_consecutive_updates >= max_consecutive_updates) {
             cuda_ctx->cuda_graph->disable_due_to_too_many_updates = true;
 #ifndef NDEBUG
-            GGML_LOG_DEBUG("%s: disabling CUDA graphs due to too many consecutive updates\n", __func__);
+            GGML_LOG_DEBUG("%s: disabling %s graphs due to too many consecutive updates\n", __func__,
+#if defined(GGML_USE_HIP)
+                    "HIP"
+#else
+                    "CUDA"
+#endif
+                    );
 #endif
         }
     }
