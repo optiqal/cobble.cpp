@@ -340,7 +340,11 @@ static void ggml_cuda_set_prefetch_enabled(bool enabled) {
     // Copy the prefetch enabled flag to device constant memory
     // Note: For multi-GPU, this sets the flag for the current device
     bool host_flag = enabled;
+#if defined(GGML_USE_HIP)
+    CUDA_CHECK(hipMemcpyToSymbol(g_prefetch_enabled_device, &host_flag, sizeof(bool)));
+#else
     CUDA_CHECK(cudaMemcpyToSymbol(g_prefetch_enabled_device, &host_flag, sizeof(bool)));
+#endif
 }
 
 static __device__ __forceinline__ void ggml_cuda_prefetch_hbm2(const void * addr) {
