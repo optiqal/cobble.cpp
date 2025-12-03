@@ -208,6 +208,13 @@ static ggml_cuda_device_info ggml_cuda_init() {
 #else
     GGML_LOG_INFO("%s: GGML_CUDA_FORCE_CUBLAS: no\n", __func__);
 #endif // GGML_CUDA_FORCE_CUBLAS
+#if defined(GGML_USE_HIP)
+#ifdef USE_CUDA_GRAPH
+    GGML_LOG_INFO("%s: HIP graphs: enabled (compiled with GGML_HIP_GRAPHS)\n", __func__);
+#else
+    GGML_LOG_INFO("%s: HIP graphs: disabled (not compiled, set GGML_HIP_GRAPHS=ON to enable)\n", __func__);
+#endif // USE_CUDA_GRAPH
+#endif // GGML_USE_HIP
     GGML_LOG_INFO("%s: found %d " GGML_CUDA_NAME " devices:\n", __func__, info.device_count);
 
     std::vector<std::pair<int, std::string>> turing_devices_without_mma;
@@ -3738,6 +3745,18 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 #ifdef USE_CUDA_GRAPH
     static const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);
 
+#if defined(GGML_USE_HIP)
+    static bool hip_graph_status_logged = false;
+    if (!hip_graph_status_logged) {
+        if (disable_cuda_graphs_due_to_env) {
+            GGML_LOG_INFO("%s: HIP graphs compiled but disabled via GGML_CUDA_DISABLE_GRAPHS environment variable\n", __func__);
+        } else {
+            GGML_LOG_INFO("%s: HIP graphs enabled (compiled with GGML_HIP_GRAPHS)\n", __func__);
+        }
+        hip_graph_status_logged = true;
+    }
+#endif
+
     // Objects required for CUDA Graph
     if (cuda_ctx->cuda_graph == nullptr) {
         cuda_ctx->cuda_graph.reset(new ggml_cuda_graph());
@@ -3792,6 +3811,24 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 
         use_cuda_graph = check_node_graph_compatibility(cgraph, use_cuda_graph);
 
+#if defined(GGML_USE_HIP)
+        static bool hip_graph_usage_logged = false;
+        if (!hip_graph_usage_logged && use_cuda_graph) {
+            if (cuda_ctx->cuda_graph->instance != nullptr) {
+                GGML_LOG_INFO("%s: HIP graphs: using existing graph instance\n", __func__);
+            } else if (cuda_graph_update_required) {
+                GGML_LOG_INFO("%s: HIP graphs: will capture new graph with %d nodes\n", __func__, cgraph->n_nodes);
+            } else {
+                GGML_LOG_INFO("%s: HIP graphs: graph ready, no update required\n", __func__);
+            }
+            hip_graph_usage_logged = true;
+        }
+        if (!hip_graph_usage_logged && !use_cuda_graph) {
+            GGML_LOG_INFO("%s: HIP graphs: disabled due to node incompatibility\n", __func__);
+            hip_graph_usage_logged = true;
+        }
+#endif
+
         // Disable CUDA graphs (from the next token) if the use-case is demanding too many consecutive graph updates.
         if (use_cuda_graph && cuda_graph_update_required) {
             cuda_ctx->cuda_graph->number_consecutive_updates++;
@@ -3844,6 +3881,13 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 #else
     bool use_cuda_graph = false;
     bool cuda_graph_update_required = false;
+#if defined(GGML_USE_HIP)
+    static bool hip_graph_not_compiled_logged = false;
+    if (!hip_graph_not_compiled_logged) {
+        GGML_LOG_INFO("%s: HIP graphs not compiled (GGML_HIP_GRAPHS was not enabled at build time)\n", __func__);
+        hip_graph_not_compiled_logged = true;
+    }
+#endif
 #endif // USE_CUDA_GRAPH
 
     bool graph_evaluated_or_captured = false;
