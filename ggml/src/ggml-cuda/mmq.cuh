@@ -718,11 +718,18 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 #if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
     // Load kvalues_mxfp4 lookup table into shared memory for gfx906 optimization
     // This reduces constant memory access latency and improves throughput for MXFP4 models
-    __shared__ int8_t kvalues_mxfp4_shmem[16];
-    if (threadIdx.x < 16) {
-        kvalues_mxfp4_shmem[threadIdx.x] = kvalues_mxfp4[threadIdx.x];
+    // Use static shared memory to avoid reloading on every call (load_tiles_mxfp4 is called multiple times per kernel)
+    static __shared__ int8_t kvalues_mxfp4_shmem[16];
+    static __shared__ int kvalues_mxfp4_init_flag;
+    
+    // Initialize once per block using atomic flag (load_tiles_mxfp4 is called in a loop)
+    if (atomicExch(&kvalues_mxfp4_init_flag, 1) == 0) {
+        // First thread to enter loads the table
+        if (threadIdx.x < 16) {
+            kvalues_mxfp4_shmem[threadIdx.x] = kvalues_mxfp4[threadIdx.x];
+        }
     }
-    __syncthreads();
+    __syncthreads(); // Ensure all threads see the loaded table
     const int8_t * kvalues_table = kvalues_mxfp4_shmem;
 #else
     const int8_t * kvalues_table = kvalues_mxfp4;
@@ -2505,11 +2512,18 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 #if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
     // Load kvalues_iq4nl lookup table into shared memory for gfx906 optimization
     // This reduces constant memory access latency and improves throughput for IQ4_NL models
-    __shared__ int8_t kvalues_iq4nl_shmem[16];
-    if (threadIdx.x < 16) {
-        kvalues_iq4nl_shmem[threadIdx.x] = kvalues_iq4nl[threadIdx.x];
+    // Use static shared memory to avoid reloading on every call (load_tiles_iq4_nl is called multiple times per kernel)
+    static __shared__ int8_t kvalues_iq4nl_shmem[16];
+    static __shared__ int kvalues_iq4nl_init_flag;
+    
+    // Initialize once per block using atomic flag (load_tiles_iq4_nl is called in a loop)
+    if (atomicExch(&kvalues_iq4nl_init_flag, 1) == 0) {
+        // First thread to enter loads the table
+        if (threadIdx.x < 16) {
+            kvalues_iq4nl_shmem[threadIdx.x] = kvalues_iq4nl[threadIdx.x];
+        }
     }
-    __syncthreads();
+    __syncthreads(); // Ensure all threads see the loaded table
     const int8_t * kvalues_table = kvalues_iq4nl_shmem;
 #else
     const int8_t * kvalues_table = kvalues_iq4nl;
