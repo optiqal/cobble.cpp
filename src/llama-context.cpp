@@ -919,28 +919,42 @@ int llama_context::encode(const llama_batch & batch_inp) {
             case LLAMA_POOLING_TYPE_LAST:
                 {
                     // extract sequence embeddings
+                    // Optimize: resize all vectors first, then batch all tensor_get operations together
                     auto & embd_seq_out = embd_seq;
 
+                    // First pass: resize all vectors to avoid memory allocation between tensor_get calls
+                    for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+                        const llama_seq_id seq_id = ubatch.seq_id_unq[s];
+                        embd_seq_out[seq_id].resize(n_embd);
+                    }
+
+                    // Second pass: queue all tensor_get operations together for better batching
                     for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
                         const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
                         const int32_t      seq_idx = ubatch.seq_idx[seq_id];
 
-                        embd_seq_out[seq_id].resize(n_embd);
                         ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd*seq_idx)*sizeof(float), n_embd*sizeof(float));
                     }
                 } break;
             case LLAMA_POOLING_TYPE_RANK:
                 {
                     // extract the rerank score - n_cls_out floats per sequence
+                    // Optimize: resize all vectors first, then batch all tensor_get operations together
                     auto & embd_seq_out = embd_seq;
 
                     const uint32_t n_cls_out = hparams.n_cls_out;
 
+                    // First pass: resize all vectors to avoid memory allocation between tensor_get calls
+                    for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+                        const llama_seq_id seq_id = ubatch.seq_id_unq[s];
+                        embd_seq_out[seq_id].resize(n_cls_out);
+                    }
+
+                    // Second pass: queue all tensor_get operations together for better batching
                     for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
                         const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
                         const int32_t      seq_idx = ubatch.seq_idx[seq_id];
 
-                        embd_seq_out[seq_id].resize(n_cls_out);
                         ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_cls_out*seq_idx)*sizeof(float), n_cls_out*sizeof(float));
                     }
                 } break;
@@ -1155,6 +1169,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
             t_embd = res->get_embd_pooled();
         }
 
+        // Batch all tensor_get operations for this ubatch together to reduce overhead
+        // and allow better GPU utilization. All operations are queued before moving to next ubatch.
+        
         // extract logits
         if (t_logits && n_outputs > 0) {
             ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched.get(), t_logits);
@@ -1185,6 +1202,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                         if (n_outputs) {
                             GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
                             GGML_ASSERT((n_outputs_prev + n_outputs)*n_embd <= (int64_t) embd_size);
+                            // Queue tensor_get immediately after logits for better batching
                             ggml_backend_tensor_get_async(backend_embd, t_embd, embd_out, 0, n_outputs*n_embd*sizeof(float));
                         }
                     } break;
@@ -1193,28 +1211,42 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 case LLAMA_POOLING_TYPE_LAST:
                     {
                         // extract sequence embeddings (cleared before processing each batch)
+                        // Optimize: resize all vectors first, then batch all tensor_get operations together
                         auto & embd_seq_out = embd_seq;
 
+                        // First pass: resize all vectors to avoid memory allocation between tensor_get calls
+                        for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+                            const llama_seq_id seq_id = ubatch.seq_id_unq[s];
+                            embd_seq_out[seq_id].resize(n_embd);
+                        }
+
+                        // Second pass: queue all tensor_get operations together for better batching
                         for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
                             const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
                             const int32_t      seq_idx = ubatch.seq_idx[seq_id];
 
-                            embd_seq_out[seq_id].resize(n_embd);
                             ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd*seq_idx)*sizeof(float), n_embd*sizeof(float));
                         }
                     } break;
                 case LLAMA_POOLING_TYPE_RANK:
                     {
                         // extract the rerank score - n_cls_out floats per sequence
+                        // Optimize: resize all vectors first, then batch all tensor_get operations together
                         auto & embd_seq_out = embd_seq;
 
                         const uint32_t n_cls_out = hparams.n_cls_out;
 
+                        // First pass: resize all vectors to avoid memory allocation between tensor_get calls
+                        for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+                            const llama_seq_id seq_id = ubatch.seq_id_unq[s];
+                            embd_seq_out[seq_id].resize(n_cls_out);
+                        }
+
+                        // Second pass: queue all tensor_get operations together for better batching
                         for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
                             const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
                             const int32_t      seq_idx = ubatch.seq_idx[seq_id];
 
-                            embd_seq_out[seq_id].resize(n_cls_out);
                             ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_cls_out*seq_idx)*sizeof(float), n_cls_out*sizeof(float));
                         }
                     } break;
