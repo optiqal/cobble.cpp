@@ -3704,12 +3704,19 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     bool cuda_graph_update_required = false;
 
     if (cuda_ctx->cuda_graph->graph == nullptr) {
+        // For HIP, graphs should work on all supported architectures (ROCm 6.1+ requirement ensures compatibility)
+        // For CUDA, only disable on architectures older than Ampere
+#if defined(GGML_USE_HIP)
+        // HIP graphs are supported on all architectures with ROCm 6.1+
+        // Skip architecture check for HIP
+#else
         if (ggml_cuda_info().devices[cuda_ctx->device].cc < GGML_CUDA_CC_AMPERE) {
             cuda_ctx->cuda_graph->disable_due_to_gpu_arch = true;
 #ifndef NDEBUG
             GGML_LOG_DEBUG("%s: disabling CUDA graphs due to GPU architecture\n", __func__);
 #endif
         }
+#endif // defined(GGML_USE_HIP)
     }
 
     // Disable CUDA graphs in presence of env var, old GPU, use-case which is changing too rapidly,
