@@ -312,5 +312,20 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11) {
         }
     }
 
+    // gfx906 (Vega20/MI50/Radeon VII) supports dp4a, so allow MMQ usage more broadly
+    // Similar to RDNA2 which also has dp4a support
+    if (cc >= GGML_CUDA_CC_VEGA20 && cc < GGML_CUDA_CC_CDNA1) {
+        // For Vega20 with dp4a, use MMQ for smaller batch sizes or specific quant types
+        if (ne11 <= 128 || type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q4_1 || 
+            type == GGML_TYPE_Q5_0 || type == GGML_TYPE_Q5_1) {
+            return true;
+        }
+        if (ne11 <= 256 && (type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K)) {
+            return true;
+        }
+        // For larger batches, fall back to rocBLAS unless batch is small
+        return ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
+    }
+
     return (!GGML_CUDA_CC_IS_RDNA3(cc) && !GGML_CUDA_CC_IS_CDNA(cc)) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
 }
