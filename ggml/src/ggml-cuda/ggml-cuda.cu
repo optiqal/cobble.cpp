@@ -2304,8 +2304,6 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
 
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     static const bool log_performance = (getenv("GGML_HIP_LOG_PERFORMANCE") != nullptr);
-    static thread_local int call_count = 0;
-    static thread_local std::map<std::string, int> kernel_usage_stats;
     
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
@@ -2371,9 +2369,15 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         static std::mutex stats_mutex;
         static std::map<std::string, int> global_kernel_stats;
         static int total_calls = 0;
+        static int logged_calls = 0;
         
         std::lock_guard<std::mutex> lock(stats_mutex);
         total_calls++;
+        const int current_call = total_calls;
+        const bool should_log = (logged_calls < 100);
+        if (should_log) {
+            logged_calls++;
+        }
         
         // Determine kernel name (always, not just for logging)
         const char * kernel_name = nullptr;
@@ -2413,15 +2417,14 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
             global_kernel_stats[kernel_name]++;
         }
         
-        // Detailed logging for first 100 calls
-        if (call_count++ < 100) {
+        // Detailed logging for first 100 calls (shared across all threads)
+        if (should_log) {
             if (kernel_name) {
-                kernel_usage_stats[kernel_name]++;
                 const int64_t total_elements = src0->ne[0] * src0->ne[1] * src1->ne[1];
                 const double gb_per_op = (double)total_elements * sizeof(float) / (1024.0 * 1024.0 * 1024.0);
                 
                 GGML_LOG_INFO("ggml_cuda_mul_mat[%d]: type=%s ne11=%ld ne0=%ld ne1=%ld -> %s (%s)\n",
-                    call_count, ggml_type_name(src0->type), (long)src1->ne[1], (long)src0->ne[0], (long)src0->ne[1],
+                    current_call, ggml_type_name(src0->type), (long)src1->ne[1], (long)src0->ne[0], (long)src0->ne[1],
                     kernel_name, reason);
                 GGML_LOG_INFO("  Data size: %.2f GB, split=%d, bad_padding=%d\n",
                     gb_per_op, split ? 1 : 0, bad_padding_clear ? 1 : 0);
