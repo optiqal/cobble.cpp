@@ -3425,7 +3425,20 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
     // GGML_PAD aligns to nwarps*warp_size*sizeof(int) to avoid bank conflicts
     // For gfx906: nwarps=4, warp_size=64, so padding aligns to 1024 bytes (256 ints)
     // This ensures that tile_x access patterns don't cause bank conflicts
-    int * tile_x = tile_y + GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size);
+    constexpr int tile_x_size = GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size);
+    int * tile_x = tile_y + tile_x_size;
+    
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+    // Software pipelining: Double buffer tile_x to overlap memory loads with computation
+    // This hides HBM2 latency (~194ns) by loading next iteration while computing current
+    // Strategy: Use two tile_x buffers, alternate between them using buffer indices
+    int * tile_x_buf[2] = {tile_x, tile_x + tile_x_size};
+    int buf_idx = 0; // Current buffer index (0 or 1)
+    constexpr bool use_pipelining = true;
+#else
+    constexpr bool use_pipelining = false;
+    int buf_idx = 0;
+#endif
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     constexpr vec_dot_mmq_t    vec_dot    = mmq_type_traits<mmq_x, mmq_y, need_check, type>::vec_dot_mma;
@@ -3439,8 +3452,34 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
     float sum[mmq_x*mmq_y / (nwarps*warp_size)] = {0.0f};
 
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+    // Software pipelining: Pre-load first tile_x before entering main loop
+    // This allows us to start computation immediately while loading the next tile
+    if (kb0_start < kb0_stop) {
+        load_tiles(x, tile_x_buf[buf_idx], offset_x + kb0_start, tile_x_max_i, stride_row_x);
+    }
+    __syncthreads();
+#endif
+
     for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter) {
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+        // Software pipelining: Overlap memory loads with computation
+        // Strategy: Use double buffering to load next iteration's tile_x while computing current
+        int current_buf = buf_idx;
+        int next_buf = 1 - buf_idx;
+        
+        if (kb0 == kb0_start) {
+            // First iteration: already loaded above, just use it
+        } else {
+            // Load current iteration's tile_x (swapped from previous iteration if pipelining was used)
+            load_tiles(x, tile_x_buf[current_buf], offset_x + kb0, tile_x_max_i, stride_row_x);
+        }
+        
+        int * tile_x_compute = tile_x_buf[current_buf];
+#else
         load_tiles(x, tile_x, offset_x + kb0, tile_x_max_i, stride_row_x);
+        int * tile_x_compute = tile_x;
+#endif
 
         {
             const int * by0 = y + ncols_y*(kb0*(qk*sizeof(block_q8_1_mmq) / (4*QK8_1*sizeof(int))) + 0*sizeof(block_q8_1_mmq)/sizeof(int));
@@ -3454,9 +3493,20 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
         __syncthreads();
 
-        vec_dot(tile_x, tile_y, sum, 0);
+        vec_dot(tile_x_compute, tile_y, sum, 0);
 
         __syncthreads();
+        
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+        // Software pipelining: Start loading next iteration's tile_x while we prepare for second vec_dot
+        // This overlaps the memory load with tile_y[1] loading and second vec_dot computation
+        // The memory controller can prefetch tile_x[N+1] while we compute with tile_x[N]
+        if (use_pipelining && kb0 + blocks_per_iter < kb0_stop) {
+            // Load next iteration's tile_x into the alternate buffer
+            // This happens in parallel with the tile_y[1] load and second vec_dot below
+            load_tiles(x, tile_x_buf[next_buf], offset_x + kb0 + blocks_per_iter, tile_x_max_i, stride_row_x);
+        }
+#endif
 
         {
             const int * by0 = y + ncols_y*(kb0*(qk*sizeof(block_q8_1_mmq) / (4*QK8_1*sizeof(int))) + 1*sizeof(block_q8_1_mmq)/sizeof(int));
@@ -3470,9 +3520,16 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
         __syncthreads();
 
-        vec_dot(tile_x, tile_y, sum, MMQ_TILE_NE_K);
+        vec_dot(tile_x_compute, tile_y, sum, MMQ_TILE_NE_K);
 
         __syncthreads();
+        
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+        // Software pipelining: Swap buffers for next iteration
+        if (use_pipelining && kb0 + blocks_per_iter < kb0_stop) {
+            buf_idx = next_buf; // Switch to the buffer we just loaded
+        }
+#endif
     }
 
     if (fixup) {
@@ -3904,7 +3961,18 @@ static size_t mmq_get_nbytes_shared(const int mmq_x, const int mmq_y, const int 
     const size_t nbs_ids = mmq_x*sizeof(int);
     const size_t nbs_x = (turing_mma_available(cc) || amd_mfma_available(cc) || amd_wmma_available(cc)) ? mmq_y*mmq_tile_x_k*sizeof(int) : txs.qs*sizeof(int) + txs.dm*sizeof(half2) + txs.sc*sizeof(int);
     const size_t nbs_y = mmq_x*sizeof(block_q8_1_mmq);
+    
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+    // Software pipelining: Double buffer tile_x to overlap memory loads with computation
+    // This requires 2x tile_x size in shared memory
+    // tile_x_size = GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size) in the kernel
+    // For shared memory calculation, we use nbs_x which represents tile_x size
+    // Double it for double buffering
+    const size_t tile_x_size_padded = GGML_PAD(nbs_x / sizeof(int), nwarps*warp_size) * sizeof(int);
+    return nbs_ids + tile_x_size_padded * 2 + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
+#else
     return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
+#endif
 }
 
 template <ggml_type type, int mmq_x>
