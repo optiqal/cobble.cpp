@@ -3983,6 +3983,37 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
         GGML_LOG_INFO("  Shared memory: %zu/%zu bytes (%.1f%%), estimated iterations: %ld\n",
             shared_mem, smpbo, 100.0 * shared_mem / smpbo, (long)estimated_iterations);
         
+        // Memory access pattern telemetry for gfx906 (Phase 2.3)
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+        const tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(type, mmq_y);
+        const int mmq_tile_x_k = mmq_get_mma_tile_x_k(type);
+        const size_t tile_x_size = (turing_mma_available(cc) || amd_mfma_available(cc) || amd_wmma_available(cc)) 
+            ? mmq_y * mmq_tile_x_k * sizeof(int) 
+            : (txs.qs * sizeof(int) + txs.dm * sizeof(half2) + txs.sc * sizeof(int));
+        const size_t tile_y_size = mmq_x_best * sizeof(block_q8_1_mmq);
+        const double shared_mem_mb = shared_mem / (1024.0 * 1024.0);
+        const double global_mem_gb = (args.ncols_max * args.nrows_x * ggml_type_size(type) + 
+                                      args.ncols_y * args.nrows_x * sizeof(block_q8_1)) / (1024.0 * 1024.0 * 1024.0);
+        
+        fprintf(stderr, "  Memory telemetry: shared=%.2f MB (tile_x=%.2f KB, tile_y=%.2f KB), global=%.3f GB\n",
+            shared_mem_mb, tile_x_size / 1024.0, tile_y_size / 1024.0, global_mem_gb);
+        fprintf(stderr, "  Access pattern: %ld iterations, %ld elements/iteration\n",
+            (long)estimated_iterations, (long)(args.ncols_max / estimated_iterations));
+        
+        // Shared memory bank conflict analysis for 32-bank architecture
+        const int64_t tile_x_elements = tile_x_size / sizeof(int);
+        const int64_t tile_y_elements = tile_y_size / sizeof(int);
+        const bool tile_x_bank_conflict_risk = (tile_x_elements % 32 == 0); // Stride-32 can cause conflicts
+        const bool tile_y_bank_conflict_risk = (tile_y_elements % 32 == 0);
+        if (tile_x_bank_conflict_risk || tile_y_bank_conflict_risk) {
+            fprintf(stderr, "  ⚠️  Bank conflict risk: tile_x stride=%ld, tile_y stride=%ld (32-bank architecture)\n",
+                (long)(tile_x_size / mmq_y), (long)(tile_y_size / mmq_x_best));
+        } else {
+            fprintf(stderr, "  ✓ Bank conflicts: Low risk (padding avoids stride-32 conflicts)\n");
+        }
+        fflush(stderr);
+#endif
+        
         if (shared_mem > smpbo * 0.9) {
             GGML_LOG_INFO("  ⚠️  Optimization: Shared memory usage (%zu bytes) is >90%% of limit (%zu bytes)\n",
                 shared_mem, smpbo);

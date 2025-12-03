@@ -2432,17 +2432,60 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
             global_kernel_stats[kernel_name]++;
         }
         
-        // Detailed logging for first 100 calls (shared across all threads)
+                // Detailed logging for first 100 calls (shared across all threads)
         if (should_log) {
             if (kernel_name) {
                 const int64_t total_elements = src0->ne[0] * src0->ne[1] * src1->ne[1];
                 const double gb_per_op = (double)total_elements * sizeof(float) / (1024.0 * 1024.0 * 1024.0);
+                
+                // Memory access pattern telemetry (Phase 2.3)
+                const int64_t src0_size = ggml_nbytes(src0);
+                const int64_t src1_size = ggml_nbytes(src1);
+                const int64_t dst_size = ggml_nbytes(dst);
+                const double total_mem_gb = (src0_size + src1_size + dst_size) / (1024.0 * 1024.0 * 1024.0);
+                
+                // Calculate access stride patterns
+                const int64_t stride_src0 = src0->nb[1] / ggml_type_size(src0->type);
+                const int64_t stride_src1 = src1->nb[1] / ggml_type_size(src1->type);
+                const bool src0_coalesced = (stride_src0 == 1 || stride_src0 == src0->ne[0]);
+                const bool src1_coalesced = (stride_src1 == 1 || stride_src1 == src1->ne[0]);
+                
+                // Estimate memory bandwidth requirements (read + write)
+                // For matrix multiplication: read A, read B, write C
+                const double read_bandwidth_gb = (src0_size + src1_size) / (1024.0 * 1024.0 * 1024.0);
+                const double write_bandwidth_gb = dst_size / (1024.0 * 1024.0 * 1024.0);
+                const double total_bandwidth_gb = read_bandwidth_gb + write_bandwidth_gb;
                 
                 fprintf(stderr, "ggml_cuda_mul_mat[%d]: type=%s ne11=%ld ne0=%ld ne1=%ld -> %s (%s)\n",
                     current_call, ggml_type_name(src0->type), (long)src1->ne[1], (long)src0->ne[0], (long)src0->ne[1],
                     kernel_name, reason);
                 fprintf(stderr, "  Data size: %.2f GB, split=%d, bad_padding=%d\n",
                     gb_per_op, split ? 1 : 0, bad_padding_clear ? 1 : 0);
+                
+                // Memory access pattern telemetry
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+                fprintf(stderr, "  Memory telemetry: total=%.3f GB (read=%.3f GB, write=%.3f GB)\n",
+                    total_mem_gb, read_bandwidth_gb, write_bandwidth_gb);
+                fprintf(stderr, "  Access patterns: src0_stride=%ld (%s), src1_stride=%ld (%s)\n",
+                    (long)stride_src0, src0_coalesced ? "coalesced" : "scattered",
+                    (long)stride_src1, src1_coalesced ? "coalesced" : "scattered");
+                
+                // Estimate cache behavior (for gfx906: 4MB L2 cache)
+                const double l2_cache_size_gb = 4.0 / 1024.0; // 4MB L2 cache
+                const bool likely_cache_miss = (total_mem_gb > l2_cache_size_gb * 0.5); // >50% of L2 cache
+                if (likely_cache_miss) {
+                    fprintf(stderr, "  ⚠️  Cache: %.3f GB > 50%% of L2 (4MB), likely cache misses\n", total_mem_gb);
+                } else {
+                    fprintf(stderr, "  ✓ Cache: %.3f GB fits in L2 cache, good cache locality\n", total_mem_gb);
+                }
+                
+                // Memory bandwidth utilization estimate (gfx906: ~1TB/s HBM2)
+                const double hbm2_bandwidth_tb = 1.0; // 1TB/s theoretical peak
+                const double bandwidth_utilization = (total_bandwidth_gb / 1024.0) / hbm2_bandwidth_tb * 100.0;
+                fprintf(stderr, "  Bandwidth: %.3f GB/op, estimated utilization: %.1f%% of HBM2 peak\n",
+                    total_bandwidth_gb, bandwidth_utilization);
+#endif
+                
                 GGML_LOG_INFO("ggml_cuda_mul_mat[%d]: type=%s ne11=%ld ne0=%ld ne1=%ld -> %s (%s)\n",
                     current_call, ggml_type_name(src0->type), (long)src1->ne[1], (long)src0->ne[0], (long)src0->ne[1],
                     kernel_name, reason);
