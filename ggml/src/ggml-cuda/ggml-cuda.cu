@@ -2843,9 +2843,29 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_RMS_NORM_BACK:
             ggml_cuda_op_rms_norm_back(ctx, dst);
             break;
-        case GGML_OP_MUL_MAT:
+        case GGML_OP_MUL_MAT: {
+            static const bool log_performance = (getenv("GGML_HIP_LOG_PERFORMANCE") != nullptr);
+            static std::once_flag first_mul_mat_flag;
+            std::call_once(first_mul_mat_flag, [&]() {
+                if (log_performance) {
+                    fprintf(stderr, "ggml_cuda_compute_forward: GGML_OP_MUL_MAT first call detected\n");
+                    fflush(stderr);
+                }
+            });
+            if (log_performance) {
+                static int mul_mat_count = 0;
+                static std::mutex mul_mat_mutex;
+                std::lock_guard<std::mutex> lock(mul_mat_mutex);
+                mul_mat_count++;
+                if (mul_mat_count <= 10) {
+                    fprintf(stderr, "ggml_cuda_compute_forward: GGML_OP_MUL_MAT call #%d, type=%s ne11=%ld\n",
+                        mul_mat_count, ggml_type_name(dst->src[0]->type), (long)dst->src[1]->ne[1]);
+                    fflush(stderr);
+                }
+            }
             ggml_cuda_mul_mat(ctx, dst->src[0], dst->src[1], dst);
             break;
+        }
         case GGML_OP_MUL_MAT_ID:
             ggml_cuda_mul_mat_id(ctx, dst);
             break;
