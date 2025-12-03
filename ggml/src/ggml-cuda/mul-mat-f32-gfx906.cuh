@@ -48,8 +48,11 @@ static __global__ void mul_mat_f32_gfx906_attention(
     const int warp_row_start = warp_id * 16; // TILE_M / nwarps = 64/4 = 16
     
     // Main computation loop over K dimension
+    // Cache-aware optimization: Tile sizes chosen to maximize L1/L2 cache reuse
+    // TILE_M=64, TILE_N=32, TILE_K=64: Shared memory ~16KB (fits in L1), working set fits in L2
     for (int k_tile = 0; k_tile < K; k_tile += TILE_K) {
         // Cooperative loading of tile_A (transposed): A[k][row] -> tile_A[k][row]
+        // Cache-aware: Access pattern is coalesced (stride-1 within each thread's work)
         // We need to load A transposed, so we access A[k_global * stride_A + row]
         for (int load_idx = threadIdx.x; load_idx < TILE_K * TILE_M; load_idx += blockDim.x) {
             const int k = load_idx / TILE_M;
@@ -58,6 +61,7 @@ static __global__ void mul_mat_f32_gfx906_attention(
             const int row = block_row + i;
             if (k_global < K && row < M) {
                 // Load A transposed: A[k][row] = A[k_global * stride_A + row]
+                // Memory access is coalesced: threads access consecutive elements
                 tile_A[k][i] = A[k_global * stride_A + row];
             } else {
                 tile_A[k][i] = 0.0f;
@@ -65,12 +69,14 @@ static __global__ void mul_mat_f32_gfx906_attention(
         }
         
         // Cooperative loading of tile_B
+        // Cache-aware: Access pattern is coalesced (stride-1 for consecutive threads)
         for (int load_idx = threadIdx.x; load_idx < TILE_K * TILE_N; load_idx += blockDim.x) {
             const int k = load_idx / TILE_N;
             const int j = load_idx % TILE_N;
             const int k_global = k_tile + k;
             const int col = block_col + j;
             if (k_global < K && col < N) {
+                // Memory access is coalesced: threads access consecutive columns
                 tile_B[k][j] = B[k_global * stride_B + col];
             } else {
                 tile_B[k][j] = 0.0f;

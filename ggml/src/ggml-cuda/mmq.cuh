@@ -3970,6 +3970,58 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
         }
     }
 
+    // Third pass (gfx906 cache-aware optimization): Optimize for L2 cache reuse
+    // For gfx906: 4MB L2 cache. Prefer tile sizes that maximize cache locality
+    // by ensuring frequently accessed data fits in L2 cache
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+    if (mmq_x_best > 0 && cc >= GGML_CUDA_CC_VEGA20 && cc < GGML_CUDA_CC_CDNA1) {
+        const size_t l2_cache_size = 4 * 1024 * 1024; // 4MB L2 cache for gfx906
+        const tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(type, mmq_y);
+        const size_t tile_x_bytes = (txs.qs * sizeof(int) + txs.dm * sizeof(half2) + txs.sc * sizeof(int));
+        const size_t tile_y_bytes = mmq_x_best * sizeof(block_q8_1_mmq);
+        
+        // Estimate memory accessed per iteration (tile data + some overhead)
+        const size_t mem_per_iteration = tile_x_bytes + tile_y_bytes + (mmq_x_best * mmq_y * sizeof(float)); // Output tile
+        
+        // If current tile size causes cache misses, try to find a better balance
+        // Prefer tile sizes that keep working set closer to L2 cache size
+        if (mem_per_iteration > l2_cache_size * 0.5) { // >50% of L2 cache per iteration
+            // Try to find a tile size that better fits in L2 cache while maintaining performance
+            int mmq_x_cache_opt = mmq_x_best;
+            double best_cache_score = (double)mem_per_iteration / l2_cache_size; // Lower is better
+            
+            for (int mmq_x = 8; mmq_x <= mmq_x_max; mmq_x += 8) {
+                const int granularity = mmq_get_granularity_host(mmq_x, cc);
+                if (mmq_x % granularity != 0 || mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size, nwarps) > smpbo) {
+                    continue;
+                }
+                
+                const int ntiles_x = (args.ncols_max + mmq_x - 1) / mmq_x;
+                // Only consider if it doesn't significantly increase iterations (within 10%)
+                if (ntiles_x > ntiles_x_best * 1.1) {
+                    continue;
+                }
+                
+                const size_t tile_y_bytes_test = mmq_x * sizeof(block_q8_1_mmq);
+                const size_t mem_per_iteration_test = tile_x_bytes + tile_y_bytes_test + (mmq_x * mmq_y * sizeof(float));
+                const double cache_score = (double)mem_per_iteration_test / l2_cache_size;
+                
+                // Prefer tile sizes that fit better in L2 cache and don't increase iterations too much
+                if (cache_score < best_cache_score && ntiles_x <= ntiles_x_best * 1.05) {
+                    mmq_x_cache_opt = mmq_x;
+                    best_cache_score = cache_score;
+                }
+            }
+            
+            // Use cache-optimized tile size if it's better
+            if (mmq_x_cache_opt != mmq_x_best && best_cache_score < 0.8) { // Only if significantly better cache fit
+                mmq_x_best = mmq_x_cache_opt;
+                ntiles_x_best = (args.ncols_max + mmq_x_best - 1) / mmq_x_best;
+            }
+        }
+    }
+#endif // defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+
     // Performance logging for MMQ kernel selection (reduced verbosity)
     if (log_performance && mmq_call_count++ < 20) {
         const size_t shared_mem = mmq_get_nbytes_shared<type>(mmq_x_best, mmq_y, cc, warp_size, nwarps);
@@ -4034,6 +4086,28 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
 #if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
         if (type == GGML_TYPE_MXFP4 || type == GGML_TYPE_IQ4_NL || type == GGML_TYPE_IQ4_XS) {
             GGML_LOG_INFO("  ✓ Lookup table optimization: Using shared memory for kvalues_* (gfx906)\n");
+        }
+        
+        // Log cache-aware optimization status
+        if (cc >= GGML_CUDA_CC_VEGA20 && cc < GGML_CUDA_CC_CDNA1) {
+            const size_t l2_cache_size = 4 * 1024 * 1024; // 4MB L2 cache
+            const tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(type, mmq_y);
+            const size_t tile_x_bytes = (txs.qs * sizeof(int) + txs.dm * sizeof(half2) + txs.sc * sizeof(int));
+            const size_t tile_y_bytes = mmq_x_best * sizeof(block_q8_1_mmq);
+            const size_t mem_per_iteration = tile_x_bytes + tile_y_bytes + (mmq_x_best * mmq_y * sizeof(float));
+            const double cache_utilization = (double)mem_per_iteration / l2_cache_size * 100.0;
+            
+            if (cache_utilization < 50.0) {
+                fprintf(stderr, "  ✓ Cache optimization: Working set (%.2f KB) fits well in L2 cache (%.1f%% utilization)\n",
+                    mem_per_iteration / 1024.0, cache_utilization);
+            } else if (cache_utilization < 80.0) {
+                fprintf(stderr, "  ⚠️  Cache: Working set (%.2f KB) uses %.1f%% of L2 cache - moderate cache pressure\n",
+                    mem_per_iteration / 1024.0, cache_utilization);
+            } else {
+                fprintf(stderr, "  ⚠️  Cache: Working set (%.2f KB) uses %.1f%% of L2 cache - high cache pressure\n",
+                    mem_per_iteration / 1024.0, cache_utilization);
+            }
+            fflush(stderr);
         }
 #endif
     }
