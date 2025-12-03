@@ -2355,7 +2355,7 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         std::lock_guard<std::mutex> lock(stats_mutex);
         total_calls++;
         const int current_call = total_calls;
-        const bool should_log = (logged_calls < 50); // Reduced from 100 to 50 for less verbosity
+        const bool should_log = (logged_calls < 10); // Reduced to 10 for minimal verbosity
         if (should_log) {
             logged_calls++;
         }
@@ -2438,46 +2438,10 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
                     const double gpu_freq_ghz = 1.8; // Typical gfx906 frequency (~1.8 GHz)
                     const double hbm2_latency_ns = (hbm2_latency_cycles / gpu_freq_ghz); // ~194ns latency
                     
-                    fprintf(stderr, "  Memory telemetry: total=%.3f GB (read=%.3f GB, write=%.3f GB)\n",
-                        total_mem_gb, read_bandwidth_gb, write_bandwidth_gb);
-                    fprintf(stderr, "  Access patterns: src0_stride=%ld (%s), src1_stride=%ld (%s)\n",
-                        (long)stride_src0, src0_coalesced ? "coalesced" : "scattered",
-                        (long)stride_src1, src1_coalesced ? "coalesced" : "scattered");
-                    
-                    // Estimate cache behavior (for gfx906: 4MB L2 cache)
-                    const double l2_cache_size_gb = 4.0 / 1024.0; // 4MB L2 cache
-                    const bool likely_cache_miss = (total_mem_gb > l2_cache_size_gb * 0.5); // >50% of L2 cache
-                    if (likely_cache_miss) {
-                        fprintf(stderr, "  ⚠️  Cache: %.3f GB > 50%% of L2 (4MB), likely cache misses\n", total_mem_gb);
-                    } else {
-                        fprintf(stderr, "  ✓ Cache: %.3f GB fits in L2 cache, good cache locality\n", total_mem_gb);
-                    }
-                    
-                    // HBM2 bandwidth utilization estimate
-                    const double bandwidth_utilization = (total_bandwidth_gb / 1024.0) / hbm2_bandwidth_tb * 100.0;
-                    fprintf(stderr, "  HBM2 Bandwidth: %.3f GB/op, estimated utilization: %.1f%% of peak (%.1f TB/s)\n",
-                        total_bandwidth_gb, bandwidth_utilization, hbm2_bandwidth_tb);
-                    
-                    // Estimate memory operations count and latency impact
-                    // For matrix multiplication: each element access may require HBM2 access if not cached
-                    const int64_t total_elements_accessed = src0->ne[0] * src0->ne[1] + src1->ne[0] * src1->ne[1] + dst->ne[0] * dst->ne[1];
-                    const double estimated_memory_ops = (double)total_elements_accessed;
-                    const double estimated_latency_ns = estimated_memory_ops * hbm2_latency_ns * 0.1; // Assume 10% cache miss rate
-                    
-                    fprintf(stderr, "  HBM2 Latency Analysis:\n");
-                    fprintf(stderr, "    Estimated memory operations: %.0f elements\n", estimated_memory_ops);
-                    fprintf(stderr, "    HBM2 latency: ~%.0f cycles (~%.1f ns) per access\n", hbm2_latency_cycles, hbm2_latency_ns);
-                    fprintf(stderr, "    Estimated total latency (10%% miss rate): ~%.1f us\n", estimated_latency_ns / 1000.0);
-                    
-                    // Identify potential bottlenecks
-                    if (bandwidth_utilization > 80.0) {
-                        fprintf(stderr, "  ⚠️  HBM2 Bandwidth Bottleneck: High utilization (%.1f%%), consider reducing memory traffic\n", bandwidth_utilization);
-                    }
-                    if (likely_cache_miss && total_mem_gb > l2_cache_size_gb * 2.0) {
-                        fprintf(stderr, "  ⚠️  Cache Bottleneck: Working set (%.3f GB) >> L2 cache (4MB), prefetching may help\n", total_mem_gb);
-                    }
+                    // Reduced verbosity: Only log critical scattered access issues
                     if (!src0_coalesced || !src1_coalesced) {
-                        fprintf(stderr, "  ⚠️  Access Pattern Bottleneck: Scattered access patterns increase HBM2 latency impact\n");
+                        fprintf(stderr, "  ⚠️  Scattered: src0_stride=%ld, src1_stride=%ld\n",
+                            (long)stride_src0, (long)stride_src1);
                     }
                 } else {
                     // Fallback for non-gfx906

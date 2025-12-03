@@ -3430,11 +3430,11 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
     
 #if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
     // Software pipelining: Double buffer tile_x to overlap memory loads with computation
-    // This hides HBM2 latency (~194ns) by loading next iteration while computing current
+    // TEMPORARILY DISABLED: Investigating regression - may need better synchronization
     // Strategy: Use two tile_x buffers, alternate between them using buffer indices
     int * tile_x_buf[2] = {tile_x, tile_x + tile_x_size};
     int buf_idx = 0; // Current buffer index (0 or 1)
-    constexpr bool use_pipelining = true;
+    constexpr bool use_pipelining = false; // DISABLED: Causing regression, needs investigation
 #else
     constexpr bool use_pipelining = false;
     int buf_idx = 0;
@@ -3971,14 +3971,12 @@ static size_t mmq_get_nbytes_shared(const int mmq_x, const int mmq_y, const int 
     const size_t nbs_y = mmq_x*sizeof(block_q8_1_mmq);
     
 #if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
-    // Software pipelining: Double buffer tile_x to overlap memory loads with computation
-    // This requires 2x tile_x size in shared memory
-    // tile_x_size in kernel = GGML_PAD(mmq_x*MMQ_TILE_Y_K, nwarps*warp_size) in ints
-    // MMQ_TILE_Y_K = MMQ_TILE_NE_K + MMQ_TILE_NE_K/QI8_1 = 32 + 4 = 36
-    // We need to match the exact calculation used in the kernel
-    const int tile_x_size_ints = GGML_PAD(mmq_x * (MMQ_TILE_NE_K + MMQ_TILE_NE_K/8), nwarps*warp_size);
-    const size_t tile_x_size_bytes = (size_t)tile_x_size_ints * sizeof(int);
-    return nbs_ids + tile_x_size_bytes * 2 + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
+    // Software pipelining: TEMPORARILY DISABLED due to regression
+    // When re-enabled, this requires 2x tile_x size in shared memory
+    // const int tile_x_size_ints = GGML_PAD(mmq_x * (MMQ_TILE_NE_K + MMQ_TILE_NE_K/8), nwarps*warp_size);
+    // const size_t tile_x_size_bytes = (size_t)tile_x_size_ints * sizeof(int);
+    // return nbs_ids + tile_x_size_bytes * 2 + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
+    return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
 #else
     return nbs_ids + nbs_x + GGML_PAD(nbs_y, nwarps*warp_size*sizeof(int));
 #endif
@@ -4189,7 +4187,7 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
 #endif // defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
 
     // Performance logging for MMQ kernel selection (reduced verbosity)
-    if (log_performance && mmq_call_count++ < 20) {
+    if (log_performance && mmq_call_count++ < 5) {
         const size_t shared_mem = mmq_get_nbytes_shared<type>(mmq_x_best, mmq_y, cc, warp_size, nwarps);
         const char * type_str = ggml_type_name(type);
         const int64_t total_elements = args.ncols_max * args.nrows_x;
@@ -4213,26 +4211,15 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
         const double global_mem_gb = (args.ncols_max * args.nrows_x * ggml_type_size(type) + 
                                       args.ncols_y * args.nrows_x * sizeof(block_q8_1)) / (1024.0 * 1024.0 * 1024.0);
         
-        fprintf(stderr, "  Memory telemetry: shared=%.2f MB (tile_x=%.2f KB, tile_y=%.2f KB), global=%.3f GB\n",
-            shared_mem_mb, tile_x_size / 1024.0, tile_y_size / 1024.0, global_mem_gb);
-        fprintf(stderr, "  Access pattern: %ld iterations, %ld elements/iteration\n",
-            (long)estimated_iterations, (long)(args.ncols_max / estimated_iterations));
-        
-        // Shared memory bank conflict analysis for 32-bank architecture (only log first 10 or when problematic)
+        // Reduced verbosity: Only log critical issues (first 2 calls)
         static int bank_conflict_log_count = 0;
         const int64_t tile_x_elements = tile_x_size / sizeof(int);
         const int64_t tile_y_elements = tile_y_size / sizeof(int);
         const bool tile_x_bank_conflict_risk = (tile_x_elements % 32 == 0); // Stride-32 can cause conflicts
         const bool tile_y_bank_conflict_risk = (tile_y_elements % 32 == 0);
-        if (tile_x_bank_conflict_risk || tile_y_bank_conflict_risk) {
-            if (bank_conflict_log_count++ < 10) {
-                fprintf(stderr, "  ⚠️  Bank conflict risk: tile_x stride=%ld, tile_y stride=%ld (32-bank architecture)\n",
-                    (long)(tile_x_size / mmq_y), (long)(tile_y_size / mmq_x_best));
-                fflush(stderr);
-            }
-        } else if (bank_conflict_log_count++ < 5) {
-            // Only log low-risk status for first 5 calls
-            fprintf(stderr, "  ✓ Bank conflicts: Low risk (padding avoids stride-32 conflicts)\n");
+        if ((tile_x_bank_conflict_risk || tile_y_bank_conflict_risk) && bank_conflict_log_count++ < 2) {
+            fprintf(stderr, "  ⚠️  Bank conflict risk: tile_x stride=%ld, tile_y stride=%ld\n",
+                (long)(tile_x_size / mmq_y), (long)(tile_y_size / mmq_x_best));
             fflush(stderr);
         }
 #endif
@@ -4263,15 +4250,12 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
             const size_t mem_per_iteration = tile_x_bytes + tile_y_bytes + (mmq_x_best * mmq_y * sizeof(float));
             const double cache_utilization = (double)mem_per_iteration / l2_cache_size * 100.0;
             
-            if (cache_utilization < 50.0) {
-                fprintf(stderr, "  ✓ Cache optimization: Working set (%.2f KB) fits well in L2 cache (%.1f%% utilization)\n",
+            // Reduced verbosity: Only log high cache pressure (first 2 calls)
+            static int cache_log_count = 0;
+            if (cache_utilization >= 80.0 && cache_log_count++ < 2) {
+                fprintf(stderr, "  ⚠️  Cache: Working set (%.2f KB) uses %.1f%% of L2 cache\n",
                     mem_per_iteration / 1024.0, cache_utilization);
-            } else if (cache_utilization < 80.0) {
-                fprintf(stderr, "  ⚠️  Cache: Working set (%.2f KB) uses %.1f%% of L2 cache - moderate cache pressure\n",
-                    mem_per_iteration / 1024.0, cache_utilization);
-            } else {
-                fprintf(stderr, "  ⚠️  Cache: Working set (%.2f KB) uses %.1f%% of L2 cache - high cache pressure\n",
-                    mem_per_iteration / 1024.0, cache_utilization);
+                fflush(stderr);
             }
             fflush(stderr);
         }

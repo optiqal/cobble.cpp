@@ -384,8 +384,8 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11) {
                 rocblas_count++;
             }
             
-            // Log first 10 decisions for verification
-            if (decision_count <= 10) {
+            // Log first 3 decisions for verification
+            if (decision_count <= 3) {
                 const char * type_str = "unknown";
                 switch (type) {
                     case GGML_TYPE_Q8_0: type_str = "Q8_0"; break;
