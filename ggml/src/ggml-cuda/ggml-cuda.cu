@@ -3746,12 +3746,14 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     static const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);
 
 #if defined(GGML_USE_HIP)
+    static int hip_graph_compute_call_count = 0;
+    hip_graph_compute_call_count++;
     static bool hip_graph_status_logged = false;
     if (!hip_graph_status_logged) {
         if (disable_cuda_graphs_due_to_env) {
             GGML_LOG_INFO("%s: HIP graphs compiled but disabled via GGML_CUDA_DISABLE_GRAPHS environment variable\n", __func__);
         } else {
-            GGML_LOG_INFO("%s: HIP graphs enabled (compiled with GGML_HIP_GRAPHS)\n", __func__);
+            GGML_LOG_INFO("%s: HIP graphs enabled (compiled with GGML_HIP_GRAPHS), processing graph with %d nodes\n", __func__, cgraph->n_nodes);
         }
         hip_graph_status_logged = true;
     }
@@ -3806,6 +3808,16 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 #endif
     }
 
+#if defined(GGML_USE_HIP)
+    // Always log graph compute status on first call to verify function is being called
+    static bool hip_graph_first_call_logged = false;
+    if (!hip_graph_first_call_logged) {
+        GGML_LOG_INFO("%s: HIP graph compute function called, use_cuda_graph=%d, graph has %d nodes\n", 
+                     __func__, use_cuda_graph, cgraph->n_nodes);
+        hip_graph_first_call_logged = true;
+    }
+#endif
+
     if (use_cuda_graph) {
         cuda_graph_update_required = is_cuda_graph_update_required(cuda_ctx, cgraph);
 
@@ -3817,14 +3829,14 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
         if (!hip_graph_usage_logged) {
             if (use_cuda_graph) {
                 if (cuda_ctx->cuda_graph->instance != nullptr) {
-                    GGML_LOG_INFO("%s: HIP graphs: using existing graph instance\n", __func__);
+                    GGML_LOG_INFO("%s: HIP graphs: using existing graph instance (graph has %d nodes)\n", __func__, cgraph->n_nodes);
                 } else if (cuda_graph_update_required) {
                     GGML_LOG_INFO("%s: HIP graphs: will capture new graph with %d nodes\n", __func__, cgraph->n_nodes);
                 } else {
-                    GGML_LOG_INFO("%s: HIP graphs: graph ready, no update required\n", __func__);
+                    GGML_LOG_INFO("%s: HIP graphs: graph ready, no update required (graph has %d nodes)\n", __func__, cgraph->n_nodes);
                 }
             } else if (use_cuda_graph_before_check) {
-                GGML_LOG_INFO("%s: HIP graphs: disabled due to node incompatibility (graph has %d nodes)\n", __func__, cgraph->n_nodes);
+                GGML_LOG_INFO("%s: HIP graphs: disabled due to node incompatibility (graph has %d nodes, likely batch size > 1)\n", __func__, cgraph->n_nodes);
             }
             hip_graph_usage_logged = true;
         }
