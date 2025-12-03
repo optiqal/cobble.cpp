@@ -2128,9 +2128,12 @@ struct server_context_impl {
                             );
 
                     // add prompt tokens for processing in the current batch
-                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.n_tokens < n_batch) {
-                        // get next token to process
-                        llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
+                    // Optimization: cache frequently accessed values to avoid redundant function calls
+                    const int32_t task_n_tokens = slot.task->n_tokens();
+                    while (slot.prompt.n_tokens() < task_n_tokens && batch.n_tokens < n_batch) {
+                        // get next token to process - cache n_tokens() result to avoid repeated calls
+                        const int32_t prompt_n_tokens = slot.prompt.n_tokens();
+                        llama_token cur_tok = input_tokens[prompt_n_tokens];
                         if (cur_tok == LLAMA_TOKEN_NULL) {
                             break; // end of text chunk
                         }
@@ -2138,8 +2141,8 @@ struct server_context_impl {
                         // if this is an alora request with pre-invocation
                         // tokens that are not cached, we need to stop filling
                         // this batch at those pre-invocation tokens.
-                        if (alora_scale > 0 && slot.prompt.n_tokens() == slot.alora_invocation_start - 1) {
-                            SLT_DBG(slot, "stop prompt batch filling at (n_tokens = %d, alora_invocation_start = %d)\n", slot.prompt.n_tokens(), slot.alora_invocation_start);
+                        if (alora_scale > 0 && prompt_n_tokens == slot.alora_invocation_start - 1) {
+                            SLT_DBG(slot, "stop prompt batch filling at (n_tokens = %d, alora_invocation_start = %d)\n", prompt_n_tokens, slot.alora_invocation_start);
                             break;
                         }
 
@@ -2154,17 +2157,20 @@ struct server_context_impl {
                         slot.n_prompt_tokens_processed++;
 
                         // process the last few tokens of the prompt separately in order to allow for a checkpoint to be created.
-                        if (do_checkpoint && slot.task->n_tokens() - slot.prompt.n_tokens() == 64) {
+                        // Use cached values to avoid redundant function calls
+                        if (do_checkpoint && task_n_tokens - (prompt_n_tokens + 1) == 64) {
                             break;
                         }
                     }
 
                     // SLT_INF(slot, "new slot.prompt.tokens: %s\n", slot.slot.prompt.tokens.str().c_str());
 
-                    SLT_INF(slot, "prompt processing progress, n_tokens = %d, batch.n_tokens = %d, progress = %f\n", slot.prompt.n_tokens(), batch.n_tokens, (float) slot.prompt.n_tokens() / slot.task->n_tokens());
+                    // Optimization: cache n_tokens() result to avoid redundant calls
+                    const int32_t final_prompt_n_tokens = slot.prompt.n_tokens();
+                    SLT_INF(slot, "prompt processing progress, n_tokens = %d, batch.n_tokens = %d, progress = %f\n", final_prompt_n_tokens, batch.n_tokens, (float) final_prompt_n_tokens / task_n_tokens);
 
                     // entire prompt has been processed
-                    if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
+                    if (final_prompt_n_tokens == task_n_tokens) {
                         slot.state = SLOT_STATE_DONE_PROMPT;
 
                         GGML_ASSERT(batch.n_tokens > 0);

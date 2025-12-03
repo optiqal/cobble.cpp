@@ -428,17 +428,24 @@ llama_context::~llama_context() {
 }
 
 void llama_context::synchronize() {
-    // Optimize: skip backend synchronization if there are no pending operations
-    // This avoids redundant synchronizations when called multiple times
-    if (n_queued_tokens > 0) {
-        ggml_backend_sched_synchronize(sched.get());
+    // Optimization: Synchronization is idempotent - if there are no pending operations,
+    // this function returns immediately without blocking. This allows safe multiple calls
+    // (e.g., llama_get_logits_ith() can call synchronize() even if sync already happened).
+    // n_queued_tokens tracks whether there are pending async operations that need synchronization.
+    if (n_queued_tokens == 0) {
+        // No pending operations - synchronization already complete or not needed
+        // This makes the function idempotent and avoids redundant backend synchronization
+        return;
     }
+
+    // Synchronize backend operations - wait for all pending GPU/compute operations to complete
+    ggml_backend_sched_synchronize(sched.get());
 
     // FIXME: if multiple single tokens are evaluated without a synchronization,
     // the stats will be added to the prompt evaluation stats
     // this should only happen when using batch size 1 to evaluate a batch
 
-    // add the evaluation to the stats
+    // add the evaluation to the stats (only when there were actually queued tokens)
     if (n_queued_tokens == 1) {
         if (!cparams.no_perf) {
             t_eval_us += ggml_time_us() - t_compute_start_us;
@@ -452,11 +459,13 @@ void llama_context::synchronize() {
     }
 
     // get a more accurate load time, upon first eval
-    if (n_queued_tokens > 0 && !has_evaluated_once) {
+    if (!has_evaluated_once) {
         t_load_us = ggml_time_us() - t_start_us;
         has_evaluated_once = true;
     }
 
+    // Reset queued tokens counter - marks that synchronization is complete
+    // Subsequent calls to synchronize() will return early (idempotent behavior)
     n_queued_tokens = 0;
     t_compute_start_us = 0;
 }
@@ -2522,12 +2531,17 @@ void llama_synchronize(llama_context * ctx) {
 }
 
 float * llama_get_logits(llama_context * ctx) {
+    // Synchronization is lazy and idempotent - if operations are already complete,
+    // synchronize() returns immediately without blocking (see synchronize() implementation)
     ctx->synchronize();
 
     return ctx->get_logits();
 }
 
 float * llama_get_logits_ith(llama_context * ctx, int32_t i) {
+    // Synchronization is lazy and idempotent - if operations are already complete,
+    // synchronize() returns immediately without blocking (see synchronize() implementation)
+    // This allows safe multiple calls without redundant synchronization overhead
     ctx->synchronize();
 
     return ctx->get_logits_ith(i);
