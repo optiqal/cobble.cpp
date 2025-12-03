@@ -76,6 +76,7 @@
 #include <stdlib.h>
 #include <string>
 #include <vector>
+#include <atomic>
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
@@ -2304,6 +2305,17 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
 
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     static const bool log_performance = (getenv("GGML_HIP_LOG_PERFORMANCE") != nullptr);
+    static std::once_flag first_call_flag;
+    
+    // Log first call to verify function is being invoked
+    std::call_once(first_call_flag, [&]() {
+        if (log_performance) {
+            GGML_LOG_INFO("ggml_cuda_mul_mat: First call detected, logging enabled\n");
+            fprintf(stderr, "ggml_cuda_mul_mat: First call detected, logging enabled\n");
+            fflush(stderr);
+            fflush(stdout);
+        }
+    });
     
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
@@ -2426,8 +2438,12 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
                 GGML_LOG_INFO("ggml_cuda_mul_mat[%d]: type=%s ne11=%ld ne0=%ld ne1=%ld -> %s (%s)\n",
                     current_call, ggml_type_name(src0->type), (long)src1->ne[1], (long)src0->ne[0], (long)src0->ne[1],
                     kernel_name, reason);
+                fprintf(stderr, "ggml_cuda_mul_mat[%d]: type=%s ne11=%ld -> %s\n", 
+                    current_call, ggml_type_name(src0->type), (long)src1->ne[1], kernel_name);
+                fflush(stderr);
                 GGML_LOG_INFO("  Data size: %.2f GB, split=%d, bad_padding=%d\n",
                     gb_per_op, split ? 1 : 0, bad_padding_clear ? 1 : 0);
+                fflush(stdout);
                 
                 // Log optimization opportunities
                 if (ggml_is_quantized(src0->type) && src1->ne[1] > MMVQ_MAX_BATCH_SIZE && !use_mul_mat_q) {
