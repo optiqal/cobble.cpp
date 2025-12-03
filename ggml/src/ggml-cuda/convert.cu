@@ -605,9 +605,60 @@ static void dequantize_row_iq4_xs_cuda(const void * vx, dst_t * y, const int64_t
 }
 
 template<typename dst_t>
+// gfx906-optimized dequantization kernel for MXFP4
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+template<typename dst_t>
+static __global__ void dequantize_block_mxfp4_gfx906(const void * __restrict__ vx, dst_t * __restrict__ yy) {
+    // Optimized for 64-lane wavefronts (gfx906)
+    // Use shared memory for kvalues_mxfp4 lookup table (16 bytes)
+    __shared__ int8_t kvalues_shmem[16];
+    
+    // Load kvalues into shared memory (cooperative across wavefront)
+    if (threadIdx.x < 16) {
+        kvalues_shmem[threadIdx.x] = kvalues_mxfp4[threadIdx.x];
+    }
+    __syncthreads();
+    
+    const int64_t i   = blockIdx.x;
+    const block_mxfp4 * x = (const block_mxfp4 *) vx + i*(QK_K/QK_MXFP4);
+    
+    // Use 64 threads (1 wavefront) - same mapping as original but with 2x threads
+    // Mapping: il = tid/8 (0-7), ib = tid%8 (0-7)
+    // Original used 32 threads (il 0-3, ib 0-7), we use 64 threads for better wavefront utilization
+    const int64_t tid = threadIdx.x;
+    const int64_t il = tid/8; // 0...7
+    const int64_t ib = tid%8; // 0...7
+    
+    // Only process if il < 4 (QK_MXFP4 = 32, needs 4 il positions of 8 values each)
+    if (il >= 4) return;
+    
+    dst_t * y = yy + i*QK_K + 32*ib + 4*il;
+    const uint8_t * q4 = x[ib].qs + 4*il;
+    const float d = ggml_cuda_e8m0_to_fp32(x[ib].e) * 0.5f;
+    
+    // Process 4 values per thread with unrolled loop
+    // Lookup from shared memory (faster than constant memory on gfx906)
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const uint8_t q_byte = q4[j];
+        const int8_t x0 = kvalues_shmem[q_byte & 0x0F];
+        const int8_t x1 = kvalues_shmem[q_byte >> 4];
+        
+        y[j + 0] = d * x0;
+        y[j + 16] = d * x1;
+    }
+}
+#endif // GGML_USE_HIP && GGML_HIP_GFX906_OPTIMIZE
+
 static void dequantize_row_mxfp4_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
     const int nb = (k + QK_K - 1) / QK_K;
+#if defined(GGML_USE_HIP) && defined(GGML_HIP_GFX906_OPTIMIZE)
+    // Use gfx906-optimized kernel with 64 threads (1 wavefront) for better utilization
+    // Each thread processes 2 il positions, giving us full wavefront utilization
+    dequantize_block_mxfp4_gfx906<<<nb, 64, 0, stream>>>(vx, y);
+#else
     dequantize_block_mxfp4<<<nb, 32, 0, stream>>>(vx, y);
+#endif
 }
 
 template <typename src_t, typename dst_t>

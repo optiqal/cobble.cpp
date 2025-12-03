@@ -3818,3 +3818,178 @@ void ggml_vec_dot_iq4_xs_q8_K(int n, float * GGML_RESTRICT s, size_t bs, const v
 #endif
 }
 
+// AVX2-optimized dequantization for Q8_0
+#if defined(__AVX2__) || defined(__AVX__)
+void dequantize_row_q8_0(const block_q8_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK8_0;
+    assert(k % qk == 0);
+    const int nb = k / qk;
+
+#if defined(__AVX2__)
+    // AVX2 version: process 32 values per block, 16 values per iteration
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_CPU_FP16_TO_FP32(x[i].d);
+        const __m256 scale = _mm256_set1_ps(d);
+        
+        // Process 32 int8 values in 2 iterations of 16 values
+        for (int j = 0; j < qk; j += 16) {
+            // Load 16 int8 values
+            const __m128i q8_16 = _mm_loadu_si128((const __m128i *)(x[i].qs + j));
+            
+            // Sign extend lower 8 int8 to int16, then to int32
+            __m128i q8_lo_s16 = _mm_unpacklo_epi8(q8_16, _mm_cmplt_epi8(q8_16, _mm_setzero_si128()));
+            __m256i q8_lo_s32 = MM256_SET_M128I(
+                _mm_unpackhi_epi16(q8_lo_s16, _mm_cmplt_epi16(q8_lo_s16, _mm_setzero_si128())),
+                _mm_unpacklo_epi16(q8_lo_s16, _mm_cmplt_epi16(q8_lo_s16, _mm_setzero_si128()))
+            );
+            __m256 f_lo = _mm256_mul_ps(scale, _mm256_cvtepi32_ps(q8_lo_s32));
+            _mm256_storeu_ps(y + i*qk + j, f_lo);
+            
+            // Sign extend upper 8 int8 to int16, then to int32
+            __m128i q8_hi_s16 = _mm_unpackhi_epi8(q8_16, _mm_cmplt_epi8(q8_16, _mm_setzero_si128()));
+            __m256i q8_hi_s32 = MM256_SET_M128I(
+                _mm_unpackhi_epi16(q8_hi_s16, _mm_cmplt_epi16(q8_hi_s16, _mm_setzero_si128())),
+                _mm_unpacklo_epi16(q8_hi_s16, _mm_cmplt_epi16(q8_hi_s16, _mm_setzero_si128()))
+            );
+            __m256 f_hi = _mm256_mul_ps(scale, _mm256_cvtepi32_ps(q8_hi_s32));
+            _mm256_storeu_ps(y + i*qk + j + 8, f_hi);
+        }
+    }
+#elif defined(__AVX__)
+    // AVX version: process 16 values per iteration using simpler unpack
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_CPU_FP16_TO_FP32(x[i].d);
+        const __m256 scale = _mm256_set1_ps(d);
+        
+        // Process 32 int8 values in 2 iterations of 16 values each
+        for (int j = 0; j < qk; j += 16) {
+            // Load 16 int8 values
+            const __m128i q8_16 = _mm_loadu_si128((const __m128i *)(x[i].qs + j));
+            
+            // Sign-extend int8 to int16, then to int32
+            // Lower 8 values
+            __m128i q8_lo_s16 = _mm_unpacklo_epi8(q8_16, _mm_cmplt_epi8(q8_16, _mm_setzero_si128()));
+            __m128i q8_lo_0 = _mm_unpacklo_epi16(q8_lo_s16, _mm_cmplt_epi16(q8_lo_s16, _mm_setzero_si128()));
+            __m128i q8_lo_1 = _mm_unpackhi_epi16(q8_lo_s16, _mm_cmplt_epi16(q8_lo_s16, _mm_setzero_si128()));
+            
+            // Upper 8 values
+            __m128i q8_hi_s16 = _mm_unpackhi_epi8(q8_16, _mm_cmplt_epi8(q8_16, _mm_setzero_si128()));
+            __m128i q8_hi_0 = _mm_unpacklo_epi16(q8_hi_s16, _mm_cmplt_epi16(q8_hi_s16, _mm_setzero_si128()));
+            __m128i q8_hi_1 = _mm_unpackhi_epi16(q8_hi_s16, _mm_cmplt_epi16(q8_hi_s16, _mm_setzero_si128()));
+            
+            // Convert to float and multiply
+            __m256 f_0 = _mm256_mul_ps(scale, _mm256_cvtepi32_ps(MM256_SET_M128I(q8_lo_1, q8_lo_0)));
+            __m256 f_1 = _mm256_mul_ps(scale, _mm256_cvtepi32_ps(MM256_SET_M128I(q8_hi_1, q8_hi_0)));
+            
+            // Store results
+            _mm256_storeu_ps(y + i*qk + j, f_0);
+            _mm256_storeu_ps(y + i*qk + j + 8, f_1);
+        }
+    }
+#endif
+}
+#endif // __AVX2__ || __AVX__
+
+// AVX2-optimized dequantization for MXFP4
+#if defined(__AVX2__) || defined(__AVX__)
+void dequantize_row_mxfp4(const block_mxfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    static const int qk = QK_MXFP4;
+    assert(k % qk == 0);
+    const int nb = k / qk;
+
+#if defined(__AVX2__)
+    // Load kvalues_mxfp4 table into register (16 int8 values)
+    const __m128i kvalues = _mm_loadu_si128((const __m128i*)kvalues_mxfp4);
+    const __m128i mask_low = _mm_set1_epi8(0x0F);
+    
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_E8M0_TO_FP32_HALF(x[i].e);
+        const __m256 scale = _mm256_set1_ps(d);
+        
+        // Process all 16 bytes (qk/2) in 2 iterations of 8 bytes each
+        // Each qs byte contains 2 nibbles, so 8 bytes = 16 values per iteration
+        for (int j = 0; j < qk/2; j += 8) {
+            // Load 8 bytes containing 16 nibbles
+            const __m128i qs_bytes = _mm_loadu_si128((const __m128i *)(x[i].qs + j));
+            
+            // Extract lower nibbles (bits 0-3) - these go to positions j+0...j+7
+            __m128i nibbles_low = _mm_and_si128(qs_bytes, mask_low);
+            // Extract upper nibbles (bits 4-7) - unpack to 16-bit, shift right by 4, mask, then pack back
+            __m128i qs_unpacked = _mm_unpacklo_epi8(qs_bytes, _mm_setzero_si128());
+            __m128i nibbles_high = _mm_and_si128(_mm_srli_epi16(qs_unpacked, 4), mask_low);
+            // Pack back to 8-bit (only need lower 8 bytes)
+            nibbles_high = _mm_packus_epi16(nibbles_high, _mm_setzero_si128());
+            
+            // Lookup kvalues using shuffle
+            __m128i values_low = _mm_shuffle_epi8(kvalues, nibbles_low);
+            __m128i values_high = _mm_shuffle_epi8(kvalues, nibbles_high);
+            
+            // Sign extend int8 to int16, then to int32 for lower 8 values
+            __m128i v_low_s16_lo = _mm_unpacklo_epi8(values_low, _mm_cmplt_epi8(values_low, _mm_setzero_si128()));
+            __m256i v_low_s32 = MM256_SET_M128I(
+                _mm_unpackhi_epi16(v_low_s16_lo, _mm_cmplt_epi16(v_low_s16_lo, _mm_setzero_si128())),
+                _mm_unpacklo_epi16(v_low_s16_lo, _mm_cmplt_epi16(v_low_s16_lo, _mm_setzero_si128()))
+            );
+            __m256 f_low = _mm256_mul_ps(scale, _mm256_cvtepi32_ps(v_low_s32));
+            _mm256_storeu_ps(y + i*qk + j + 0, f_low);
+            
+            // Sign extend int8 to int16, then to int32 for upper 8 values
+            __m128i v_high_s16_lo = _mm_unpacklo_epi8(values_high, _mm_cmplt_epi8(values_high, _mm_setzero_si128()));
+            __m256i v_high_s32 = MM256_SET_M128I(
+                _mm_unpackhi_epi16(v_high_s16_lo, _mm_cmplt_epi16(v_high_s16_lo, _mm_setzero_si128())),
+                _mm_unpacklo_epi16(v_high_s16_lo, _mm_cmplt_epi16(v_high_s16_lo, _mm_setzero_si128()))
+            );
+            __m256 f_high = _mm256_mul_ps(scale, _mm256_cvtepi32_ps(v_high_s32));
+            _mm256_storeu_ps(y + i*qk + j + qk/2 + 0, f_high);
+        }
+    }
+#elif defined(__AVX__)
+    // AVX version: similar but process 8 pairs (16 values) per iteration
+    const __m128i kvalues = _mm_loadu_si128((const __m128i*)kvalues_mxfp4);
+    const __m128i mask_low = _mm_set1_epi8(0x0F);
+    
+    for (int i = 0; i < nb; i++) {
+        const float d = GGML_E8M0_TO_FP32_HALF(x[i].e);
+        const __m256 scale = _mm256_set1_ps(d);
+        
+        // Process 8 pairs (16 values) per iteration
+        for (int j = 0; j < qk/2; j += 8) {
+            // Load 8 bytes containing 16 nibbles
+            const __m128i qs_bytes = _mm_loadu_si64((const void *)(x[i].qs + j));
+            
+            // Extract lower and upper nibbles
+            __m128i nibbles_low = _mm_and_si128(qs_bytes, mask_low);
+            __m128i nibbles_high = _mm_and_si128(_mm_srli_epi16(_mm_unpacklo_epi8(qs_bytes, qs_bytes), 4), mask_low);
+            
+            // Lookup values
+            __m128i values_low = _mm_shuffle_epi8(kvalues, nibbles_low);
+            __m128i values_high = _mm_shuffle_epi8(kvalues, nibbles_high);
+            
+            // Convert and scale (process 8 values at a time)
+            // Lower 8 values
+            __m128i v_low_lo = _mm_unpacklo_epi8(values_low, _mm_setzero_si128());
+            __m128i v_low_lo_signed = _mm_unpacklo_epi8(_mm_setzero_si128(), values_low);
+            v_low_lo_signed = _mm_srai_epi16(v_low_lo_signed, 8);
+            __m128i v_low_0 = _mm_unpacklo_epi16(v_low_lo_signed, _mm_setzero_si128());
+            __m128i v_low_1 = _mm_unpackhi_epi16(v_low_lo_signed, _mm_setzero_si128());
+            
+            __m256 f_low = _mm256_mul_ps(scale, _mm256_cvtepi32_ps(MM256_SET_M128I(v_low_1, v_low_0)));
+            
+            // Upper 8 values
+            __m128i v_high_lo = _mm_unpacklo_epi8(values_high, _mm_setzero_si128());
+            __m128i v_high_lo_signed = _mm_unpacklo_epi8(_mm_setzero_si128(), values_high);
+            v_high_lo_signed = _mm_srai_epi16(v_high_lo_signed, 8);
+            __m128i v_high_0 = _mm_unpacklo_epi16(v_high_lo_signed, _mm_setzero_si128());
+            __m128i v_high_1 = _mm_unpackhi_epi16(v_high_lo_signed, _mm_setzero_si128());
+            
+            __m256 f_high = _mm256_mul_ps(scale, _mm256_cvtepi32_ps(MM256_SET_M128I(v_high_1, v_high_0)));
+            
+            // Store results
+            _mm256_storeu_ps(y + i*qk + j + 0, f_low);
+            _mm256_storeu_ps(y + i*qk + j + qk/2 + 0, f_high);
+        }
+    }
+#endif
+}
+#endif // __AVX2__ || __AVX__
+
