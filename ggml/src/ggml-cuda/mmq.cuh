@@ -3874,6 +3874,10 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
     int mmq_x_best  = 0;
     int ntiles_x_best = INT_MAX;
 
+    // Optimized tile size selection for gfx906:
+    // 1. First pass: Find the minimum number of iterations
+    // 2. Second pass: Among tiles with the same iteration count, prefer larger tiles
+    //    (larger tiles improve memory coalescing and reduce kernel launch overhead)
     for (int mmq_x = 8; mmq_x <= mmq_x_max && ntiles_x_best > 1; mmq_x += 8) {
         const int granularity = mmq_get_granularity_host(mmq_x, cc);
 
@@ -3886,6 +3890,29 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
         if (ntiles_x < ntiles_x_best) {
             mmq_x_best = mmq_x;
             ntiles_x_best = ntiles_x;
+        }
+    }
+
+    // Second pass: Prefer larger tiles if they result in the same number of iterations
+    // This improves memory coalescing and reduces kernel launch overhead on gfx906
+    if (mmq_x_best > 0 && ntiles_x_best > 1) {
+        for (int mmq_x = mmq_x_best + 8; mmq_x <= mmq_x_max; mmq_x += 8) {
+            const int granularity = mmq_get_granularity_host(mmq_x, cc);
+
+            if (mmq_x % granularity != 0 || mmq_get_nbytes_shared<type>(mmq_x, mmq_y, cc, warp_size, nwarps) > smpbo) {
+                continue;
+            }
+
+            const int ntiles_x = (args.ncols_max + mmq_x - 1) / mmq_x;
+
+            // Prefer larger tiles if they result in the same number of iterations
+            if (ntiles_x == ntiles_x_best && mmq_x > mmq_x_best) {
+                mmq_x_best = mmq_x;
+            } else if (ntiles_x < ntiles_x_best) {
+                // Found a better tile size (fewer iterations)
+                mmq_x_best = mmq_x;
+                ntiles_x_best = ntiles_x;
+            }
         }
     }
 
